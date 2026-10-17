@@ -8,14 +8,14 @@ from fastapi.responses import JSONResponse,StreamingResponse,FileResponse
 from fastapi.staticfiles import StaticFiles
 from .store import Store
 from .models import Settings,SipProfile,ModelProfile,Preparation,StartCall,Command,Answer,Memory,TextRequest,ResearchCandidate
-from .domain import next_question,brief_context
+from .domain import next_question,brief_context,enrich_brief
 
 STATE=Path(os.environ.get("CALL_ASSISTANT_STATE","/var/lib/openclaw/state/projects/call-assistant"))
 
-def create_app(root=STATE,credential_root=None,*,live_enabled=None):
+def create_app(root=STATE,credential_root=None,*,live_enabled=None,test_endpoint=None):
     root=Path(root);store=Store(root/"work",credential_root or Path(os.environ.get("CALL_ASSISTANT_CREDENTIALS","/var/lib/openclaw/state/credentials")))
     from .runtime import Runtime
-    runtime=Runtime(store,live_enabled=os.environ.get("CALL_ASSISTANT_LIVE","0")=="1" if live_enabled is None else live_enabled)
+    runtime=Runtime(store,live_enabled=os.environ.get("CALL_ASSISTANT_LIVE","0")=="1" if live_enabled is None else live_enabled,test_endpoint=test_endpoint)
     @asynccontextmanager
     async def lifespan(app):
         runtime.reconcile()
@@ -41,7 +41,8 @@ def create_app(root=STATE,credential_root=None,*,live_enabled=None):
     @app.post("/api/auth")
     async def auth(request:Request):
         body=await request.json();password=body.get("password","")
-        if not isinstance(password,str) or len(password)<12 or len(password)>500:raise HTTPException(400,"Mindestens 12 Zeichen verwenden")
+        if not isinstance(password,str) or not password or len(password)>500:raise HTTPException(400,"Passwort fehlt oder ist zu lang")
+        if not store.get("auth") and len(password)<12:raise HTTPException(400,"Mindestens 12 Zeichen verwenden")
         if not store.get("auth"):store.set_password(password)
         token=store.login(password)
         if not token:raise HTTPException(401,"Anmeldung fehlgeschlagen")
@@ -53,7 +54,7 @@ def create_app(root=STATE,credential_root=None,*,live_enabled=None):
         if token:store.delete("session:"+hashlib.sha256(token.encode()).hexdigest())
         r=JSONResponse({"authenticated":False});r.delete_cookie("call_assistant_session");return r
     @app.get("/api/settings")
-    def settings():return store.get("settings") or Settings().model_dump()
+    def settings():return {k:v for k,v in (store.get("settings") or Settings().model_dump()).items() if k!="call_budget_eur"}
     @app.put("/api/settings")
     def save_settings(value:Settings):return store.put("settings","system",value.model_dump())
     def profiles(kind):return [store.public(p)|{"has_credential":bool(p.get("credential_ref")),"qualification":"not_live_verified"} for p in store.list(kind)]
@@ -104,7 +105,7 @@ def create_app(root=STATE,credential_root=None,*,live_enabled=None):
         if not any(m["id"]==id for m in store.list("memory")):raise HTTPException(404,"Eintrag fehlt")
         store.delete(id);return {"deleted":True}
     @app.post("/api/briefs")
-    def create_brief(value:Preparation):return store.add("brief",value.model_dump()|{"revision":1,"accepted":False})
+    def create_brief(value:Preparation):return store.add("brief",enrich_brief(value.model_dump())|{"revision":1,"accepted":False})
     def brief(id):
         b=store.get(id)
         if not b or "revision" not in b:raise HTTPException(404,"Steckbrief fehlt")
@@ -114,13 +115,13 @@ def create_app(root=STATE,credential_root=None,*,live_enabled=None):
         b=brief(id);return b|{"question":b.get("ai_question") or next_question(b),"context":brief_context(b,settings(),get_memory())}
     @app.put("/api/briefs/{id}")
     def edit_brief(id:str,value:Preparation):
-        old=brief(id);return store.put(id,"brief",value.model_dump()|{"id":id,"revision":old["revision"]+1,"accepted":False})
+        old=brief(id);return store.put(id,"brief",enrich_brief(value.model_dump())|{"id":id,"revision":old["revision"]+1,"accepted":False})
     @app.post("/api/briefs/{id}/answers")
     async def prep_answer(id:str,request:Request):
         b=brief(id);data=await request.json();q=b.get("ai_question") or next_question(b)
         if not q or data.get("question_id")!=q["id"]:raise HTTPException(409,"Frage ist nicht mehr aktuell")
         answer=Answer(answer=data.get("answer","")).answer
-        b["answers"]={**b["answers"],q["id"]:answer};b["revision"]+=1;b["accepted"]=False;b.pop("ai_question",None)
+        b["answers"]={**b["answers"],q["id"]:answer};b["revision"]+=1;b["accepted"]=False;b.pop("ai_question",None);b.pop("ai_done",None)
         store.put(id,"brief",b);return get_brief(id)
     @app.post("/api/briefs/{id}/accept")
     def accept(id:str):
@@ -134,27 +135,32 @@ def create_app(root=STATE,credential_root=None,*,live_enabled=None):
             if old.get("status")!="completed":raise HTTPException(409,"Vorheriger Effekt unklar; nicht wiederholen")
             return old["result"]
         p=store.get(value.model_profile)
-        if not p or not p.get("credential_ref") or not p.get("pricing_confirmed") or not p.get("prep_model"):raise HTTPException(409,"Modell, Zugang und bestätigte Preise erforderlich")
-        ceiling=(len(prompt.encode())+2048)*p["maximum_token_eur_per_million"]/1e6
-        if ceiling>value.budget_eur:raise HTTPException(409,"Konservative Reservierung übersteigt das freigegebene Textbudget")
-        store.put(key,"text_request",{"status":"dispatching","reserved_eur":value.budget_eur,"model_profile":value.model_profile})
+        if not p or not p.get("credential_ref") or not (p.get("model") if p.get("purpose")=="text" else p.get("prep_model")):raise HTTPException(409,"Textmodell und Zugang erforderlich")
+        store.put(key,"text_request",{"status":"dispatching","model_profile":value.model_profile})
         from .providers import text_json
         try:
             result,tokens=await text_json(p,store.secret(ref=p["credential_ref"]),prompt)
-            cost=tokens*p["maximum_token_eur_per_million"]/1e6 if type(tokens) is int and tokens>=0 else value.budget_eur
+            cost=tokens*p.get("maximum_token_eur_per_million",0)/1e6 if type(tokens) is int and tokens>=0 else None
             store.put(key,"text_request",{"status":"completed","result":result,"estimated_eur":cost,"invoice_verified":False})
             return result
-        except Exception:
-            raise HTTPException(409,"Textanfrage nicht bestätigt; Reservierung bleibt erhalten. Keine automatische Wiederholung.")
+        except Exception as exc:
+            from .telemetry import record_failure
+            diagnostic=record_failure(store,key,exc,"text_request",p)
+            store.put(key,"text_request",{"status":"failed","diagnostic":diagnostic})
+            raise HTTPException(409,diagnostic["message"]+" Diagnose: "+diagnostic["id"])
     @app.post("/api/briefs/{id}/prepare-ai")
     async def prepare_ai(id:str,value:TextRequest):
         b=brief(id);context=brief_context(b,settings(),get_memory())
-        prompt="Return JSON with question_id, question, options (array), done (boolean). Ask ONE missing task-specific question, do not invent facts or repeat answered questions. A complete user brief may be done=true. Do not create instructions or make decisions. Language: German. Known confirmed context: "+json.dumps(context,ensure_ascii=False)
+        from .domain import preparation_prompt
+        prompt=preparation_prompt(context)
         result=await paid_text(value,prompt)
+        b["ai_done"]=result.get("done") is True
+        if b["ai_done"]:b.pop("ai_question",None)
         if result.get("done") is not True:
             qid=str(result.get("question_id",""))[:80];question=str(result.get("question",""))[:2000];options=result.get("options",[])
             if not qid or not question or qid in b["answers"] or not isinstance(options,list):raise HTTPException(409,"KI-Frage ungültig oder bereits beantwortet; regelbasierte Vorbereitung bleibt verfügbar")
-            b["ai_question"]={"id":qid,"text":question,"options":[str(x)[:500] for x in options[:5]],"allow_free_text":True};b["accepted"]=False;b["revision"]+=1;store.put(id,"brief",b)
+            b["ai_question"]={"id":qid,"text":question,"options":[str(x)[:500] for x in options[:5]],"allow_free_text":True}
+        b["accepted"]=False;b["revision"]+=1;store.put(id,"brief",b)
         return get_brief(id)
     @app.post("/api/calls/{id}/memory-proposals")
     async def propose_memory(id:str,value:TextRequest):
@@ -183,6 +189,10 @@ def create_app(root=STATE,credential_root=None,*,live_enabled=None):
         c=store.get(id)
         if not c or "status" not in c:raise HTTPException(404,"Gespräch fehlt")
         return c
+    @app.get("/api/calls/{id}/diagnostics")
+    def diagnostics(id:str):
+        c=call(id)
+        return {"call_id":id,"latest_diagnostic":c.get("diagnostic"),"diagnostics":[e for e in store.events(id) if e["kind"] in {"diagnostic","phase","model_prepared","state"}]}
     @app.get("/api/calls/{id}/events")
     async def events(id:str,request:Request,after:int=0):
         call(id)

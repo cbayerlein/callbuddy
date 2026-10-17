@@ -16,9 +16,9 @@ class Settings(Contract):
     language: Literal["de", "en"] = "de"
     default_sip: str | None = None
     default_model: str | None = None
+    default_text_model: str | None = None
     model_selection: Literal["manual", "recommended"] = "manual"
     recording: bool = False
-    call_budget_eur: float = Field(default=2, gt=0, le=100)
 
 class SipProfile(Contract):
     name: str = Field(min_length=1,max_length=100)
@@ -30,8 +30,10 @@ class SipProfile(Contract):
     proxy: str = ""
     transport: Literal["udp", "tcp", "tls"] = "udp"
     caller_id: str = ""
+    phone_number: str = Field(default="",pattern=r"^(?:\+[1-9][0-9]{6,14})?$")
     stun: str = ""
     phone_eur_per_minute: float = Field(default=0,ge=0,le=100)
+    tariff_scope: Literal["any","de_standard"] = "any"
     pricing_confirmed: bool = False
     password: SecretStr | None = None
     @model_validator(mode="after")
@@ -49,7 +51,9 @@ class ModelProfile(Contract):
     provider: Literal["openai","google"]
     model: str = Field(min_length=1,max_length=120,pattern=r"^[a-zA-Z0-9._/-]+$")
     prep_model: str = ""
-    voice: str = Field(min_length=1,max_length=60)
+    backend_model: str = Field(default="gpt-6-luna",min_length=1,max_length=120,pattern=r"^[a-zA-Z0-9._/-]+$")
+    purpose: Literal["live","text"] = "live"
+    voice: str = Field(default="marin",min_length=1,max_length=60)
     language: Literal["de","en"] = "de"
     api_key: SecretStr | None = None
     eagerness: Literal["auto","low","medium","high"] = "auto"
@@ -70,9 +74,8 @@ class Preparation(Contract):
 
 class StartCall(Contract):
     request_id: str = Field(min_length=8,max_length=100)
-    mode: Literal["demo","live"] = "demo"
+    mode: Literal["live"] = "live"
     accepted_revision: int
-    budget_eur: float = Field(gt=0,le=100)
 
 class Command(Contract):
     command_id: str = Field(min_length=8,max_length=100)
@@ -91,7 +94,6 @@ class Memory(Contract):
 class TextRequest(Contract):
     model_profile: str
     request_id: str = Field(min_length=8,max_length=100)
-    budget_eur: float = Field(gt=0,le=2)
 
 class ResearchCandidate(Contract):
     name: str = Field(min_length=1,max_length=200)

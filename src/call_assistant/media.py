@@ -53,4 +53,4 @@ async def browser_peer(runtime,id,data):
                 await runtime.command(id,Command(command_id=secrets.token_hex(16),kind="release"))
     await peer.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"],type="offer"))
     await peer.setLocalDescription(await peer.createAnswer())
-    return {"sdp":peer.localDescription.sdp,"type":peer.localDescription.type,"audio_source":"demo_silence" if call["mode"]=="demo" else "local_rx_tx_monitor_not_far_end_proof"}
+    return {"sdp":peer.localDescription.sdp,"type":peer.localDescription.type,"audio_source":"local_rx_tx_monitor_not_far_end_proof"}

@@ -89,7 +89,7 @@ const defaultSettings = {
   language: "de",
   recording: false,
   model_selection: "manual",
-  call_budget_eur: 2,
+  default_text_model: "",
 };
 const terminal = ["completed", "cancelled", "failed", "inconclusive"];
 
@@ -108,16 +108,14 @@ function App() {
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false);
-  const [scenario, setScenario] = useState("restaurant"),
-    [number, setNumber] = useState(""),
+  const [number, setNumber] = useState(""),
     [objective, setObjective] = useState(""),
     [brief, setBrief] = useState<Row | null>(null),
     [free, setFree] = useState(""),
     [call, setCall] = useState<Row | null>(null),
     [events, setEvents] = useState<Row[]>([]),
     [instruction, setInstruction] = useState(""),
-    [digits, setDigits] = useState(""),
-    [mode, setMode] = useState("demo");
+    [digits, setDigits] = useState("");
   const [selectedMemory, setSelectedMemory] = useState<string[]>([]);
   const [researchJson, setResearchJson] = useState("");
   const [profileDialog, setProfileDialog] = useState<string | null>(null),
@@ -281,28 +279,47 @@ function App() {
       0,
     );
   }
+  const [preparingQuestion, setPreparingQuestion] = useState(false);
+  async function prepareQuestion(id: string) {
+    setPreparingQuestion(true);
+    try { setBrief(await api(`briefs/${id}/prepare-ai`, "POST", {model_profile: settings.default_text_model, request_id: uuid()})); }
+    finally { setPreparingQuestion(false); }
+  }
+  function transcriptBlocks(items: any[]) {
+    const blocks: any[] = [];
+    let boundary = true;
+    for (const e of items) {
+      if (["turn_complete", "interruption", "decision"].includes(e.kind)) { boundary = true; continue; }
+      if (!["transcript", "decision_answer", "private_instruction"].includes(e.kind)) continue;
+      const last = blocks[blocks.length - 1];
+      if (!boundary && e.kind === "transcript" && last?.kind === e.kind && last.speaker === e.speaker && last.source === e.source) last.text += e.text;
+      else blocks.push({...e});
+      boundary = e.kind !== "transcript";
+    }
+    return blocks;
+  }
   async function beginPrep() {
     const b = await api("briefs", "POST", {
       number,
       objective,
-      scenario,
       memory_ids: selectedMemory,
       model_profile: settings.model_selection === "recommended" ? null : settings.default_model || null,
       sip_profile: settings.default_sip || null,
     });
-    setBrief(await api(`briefs/${b.id}`));
     localStorage.setItem("callbuddy-brief-id", b.id);
+    setBrief(await api(`briefs/${b.id}`));
+    if (settings.default_text_model) await prepareQuestion(b.id);
     setCall(null);
     setFree("");
   }
   async function answerPrep(answer: string) {
     if (!brief) return;
-    setBrief(
-      await api(`briefs/${brief.id}/answers`, "POST", {
+    const updated = await api(`briefs/${brief.id}/answers`, "POST", {
         question_id: brief.question.id,
         answer,
-      }),
-    );
+      });
+    setBrief(updated);
+    if (settings.default_text_model) await prepareQuestion(brief.id);
     setFree("");
   }
   async function cmd(kind: string, text = "") {
@@ -365,10 +382,6 @@ function App() {
       await cmd("takeover");
       setSpeaking(true);
     }
-    if (call.mode === "demo")
-      setNotice(
-        "Demo: Der Audiokanal liefert Stille. Kein echter Gesprächston.",
-      );
     } catch (error) {
       p.close();
       mic.current?.getTracks().forEach((t) => t.stop());
@@ -391,7 +404,7 @@ function App() {
     setProfileDialog(kind);
     setProfileForm(
       old
-        ? { ...old, password: "", api_key: "" }
+        ? { ...old, ...(kind === "model" ? {purpose:old.purpose || "live"} : {}), password: "", api_key: "" }
         : kind === "sip"
           ? {
               name: "",
@@ -403,16 +416,20 @@ function App() {
               proxy: "",
               transport: "udp",
               caller_id: "",
+              phone_number: "",
               stun: "",
               password: "",
               phone_eur_per_minute: 0,
+              tariff_scope: "any",
               pricing_confirmed: false,
             }
           : {
               name: "",
               provider: "openai",
-              model: "gpt-realtime-2.1",
+              model: "gpt-live-1",
+              backend_model: "gpt-6-luna",
               prep_model: "",
+              purpose: "live",
               voice: "marin",
               language: "de",
               api_key: "",
@@ -499,6 +516,7 @@ function App() {
                 startIcon={<Icon name={i} />}
                 className={page === p ? "selected" : ""}
                 aria-current={page === p ? "page" : undefined}
+                aria-label={t}
                 onClick={() => navigate(p)}
               >
                 {t}
@@ -525,7 +543,7 @@ function App() {
               label="Eigene Installation"
             />
           </Box>
-          {!isSecureContext && <Alert severity="info" sx={{mb: 2}}>HTTP-Vorschau: Bitte nur Demo-Daten verwenden, keine echten SIP-/API-Zugangsdaten. Mikrofon und regulärer Betrieb benötigen HTTPS.</Alert>}
+          {!isSecureContext && <Alert severity="info" sx={{mb: 2}}>Mikrofon und regulärer Betrieb benötigen HTTPS.</Alert>}
           {error && (
             <Alert
               severity="error"
@@ -582,12 +600,12 @@ function App() {
                         }
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
-                        helperText="Mindestens 12 Zeichen. Der Zugang gehört nur dieser Installation."
+                        helperText={setup ? "Mindestens 12 Zeichen. Der Zugang gehört nur dieser Installation." : "Dein Passwort für diese Installation."}
                       />
                       <Button
                         type="submit"
                         variant="contained"
-                        disabled={busy || password.length < 12}
+                        disabled={busy || password.length < (setup ? 12 : 1)}
                         endIcon={<Icon name="arrow" />}
                       >
                         {setup ? "Zugang einrichten" : "Anmelden"}
@@ -604,9 +622,7 @@ function App() {
                   {call ? (
                     <>
                       {head(
-                        call.mode === "demo"
-                          ? "DEMO · KEINE TELEFONIE"
-                          : "LIVE-GESPRÄCH",
+                        "LIVE-GESPRÄCH",
                         call.objective,
                         "Bleib dabei, entscheide bei Rückfragen und greife jederzeit ein.",
                       )}
@@ -624,7 +640,7 @@ function App() {
                                   (
                                     {
                                       preparing: "Vorbereiten",
-                                      connected: "Verbunden",
+                                      connected: "Telefon verbunden",
                                       awaiting_user: "Deine Entscheidung",
                                       completed: "Beendet",
                                       cancelled: "Abgebrochen",
@@ -636,12 +652,12 @@ function App() {
                               />
                               <Chip
                                 label={
-                                  call.mode === "demo" ? "Simulation" : "SIP"
+                                  "SIP"
                                 }
                               />
                               <Chip
                                 label={
-                                  terminal.includes(call.status) ? "Audiokanal beendet" : call.paused
+                                  terminal.includes(call.status) ? "Audiokanal beendet" : call.audio_state !== "ready" ? "Audio wird geprüft" : call.paused
                                     ? "Modellstimme pausiert"
                                     : "Modellstimme aktiv"
                                 }
@@ -654,8 +670,8 @@ function App() {
                               variant="caption"
                               color="text.secondary"
                             >
-                              Erkennung kann ungenau sein. Demo-Texte sind
-                              ausdrücklich simuliert.
+                              Erkennung kann ungenau sein. Transkripte sind
+                              keine unabhängige Bestätigung des Gesagten.
                             </Typography>
                             <FormControlLabel
                               control={
@@ -673,14 +689,7 @@ function App() {
                               aria-label="Gesprächstranskript"
                               aria-live="off"
                             >
-                              {events
-                                .filter((e) =>
-                                  [
-                                    "transcript",
-                                    "decision_answer",
-                                    "private_instruction",
-                                  ].includes(e.kind),
-                                )
+                              {transcriptBlocks(events)
                                 .map((e) => (
                                   <Box
                                     key={e.seq}
@@ -693,9 +702,7 @@ function App() {
                                           ? "Assistenz"
                                           : "Du · privat"}{" "}
                                       ·{" "}
-                                      {e.source === "demo_script"
-                                        ? "Demo"
-                                        : e.source === "recognition"
+                                      {e.source === "recognition"
                                           ? "Erkannt"
                                           : e.source === "model_output"
                                             ? "Modellausgabe"
@@ -733,8 +740,9 @@ function App() {
                                   color="text.secondary"
                                   sx={{ my: 1 }}
                                 >
-                                  Die Assistenz entscheidet nicht an deiner
-                                  Stelle.
+                                  Bis zu deiner Antwort bleibt die Sprachausgabe gesperrt.
+                                  Ohne Antwort wird nach 20 Sekunden ohne Zusage beendet;
+                                  anschließend ist ein Rückruf zur Klärung nötig.
                                 </Typography>
                                 <Stack spacing={1}>
                                   {call.decision.options.map((o: string) => (
@@ -829,17 +837,13 @@ function App() {
                           <Card>
                             <CardContent>
                               <Typography variant="body2">
-                                Budget: {call.budget_eur.toFixed(2)} € ·
-                                Schätzung:{" "}
-                                {(call.estimated_eur || 0).toFixed(2)} €
+                                Keine automatische Kostenbegrenzung
                               </Typography>
                               <Typography
                                 variant="caption"
                                 color="text.secondary"
                               >
-                                {call.mode === "demo"
-                                  ? "Keine Anbieter- oder Telefonkosten."
-                                  : "Keine verifizierte Rechnung."}
+                                Anbieter- und Telefonkosten werden vom jeweiligen Anbieter berechnet.
                               </Typography>
                             </CardContent>
                           </Card>
@@ -859,16 +863,22 @@ function App() {
                           <Stack direction="row" sx={{gap: 1, flexWrap: "wrap", my: 2}}>
                             <Button component="a" href={apiBase()+`calls/${call.id}/transcript`} download>Transkript herunterladen</Button>
                             {call.mode === "live" && settings.recording && <Button component="a" href={apiBase()+`calls/${call.id}/audio`} download>Audio herunterladen</Button>}
-                            <Button disabled={busy || !settings.default_model || call.mode === "demo"} onClick={() => action(async () => {
-                              await api(`calls/${call.id}/memory-proposals`, "POST", {model_profile: settings.default_model, request_id: uuid(), budget_eur: 0.25});
+                            <Button disabled={busy || !settings.default_text_model} onClick={() => action(async () => {
+                              await api(`calls/${call.id}/memory-proposals`, "POST", {model_profile: settings.default_text_model, request_id: uuid()});
                               await refresh();
                               navigate("profile");
                               setNotice("KI-Vorschläge sind unbestätigt. Bitte einzeln prüfen.");
-                            })}>Memory-Vorschläge (max. 0,25 €)</Button>
+                            })}>Memory-Vorschläge</Button>
                           </Stack>
                           <Typography variant="body2" sx={{ mt: 1 }}>
-                            Cleanup: {call.cleanup}
+                            {call.cleanup === "registrar_ack_and_local_closure" ? "Telefon- und Modellverbindungen wurden geschlossen und die SIP-Abmeldung bestätigt." : "Das Schließen aller Verbindungen ist noch nicht bestätigt."}
                           </Typography>
+                          <details><summary>Technische Diagnose · Gespräch {call.id}</summary>
+                            {call.audio_health && <pre style={{whiteSpace:"pre-wrap"}}>{JSON.stringify(call.audio_health,null,2)}</pre>}
+                            <Typography variant="body2">Diagnosen und Verlauf werden automatisch auf dem Server gespeichert. Kein manueller Export zur Fehlersuche erforderlich.</Typography>
+                            {events.filter((e) => e.kind === "diagnostic" || e.kind === "phase").map((e) => <pre key={e.seq} style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{JSON.stringify(e.diagnostic || e, null, 2)}</pre>)}
+                            <Button component="a" href={apiBase()+`calls/${call.id}/diagnostics`}>Gespeicherte Diagnose öffnen</Button>
+                          </details>
                           <Button
                             sx={{ mt: 1 }}
                             onClick={() => {
@@ -978,19 +988,21 @@ function App() {
                                     ? "Fluggesellschaft"
                                     : "Dein Anliegen"}
                             </Typography>
-                            <Button disabled={busy || !settings.default_model} onClick={() => action(async () => {
-                              setBrief(await api(`briefs/${brief.id}/prepare-ai`, "POST", {model_profile: settings.default_model, request_id: uuid(), budget_eur: 0.25}));
-                            })}>Zusätzliche KI-Vorbereitung (max. 0,25 €)</Button>
+                            <Button disabled={busy || !settings.default_text_model} onClick={() => action(async () => {
+                              await prepareQuestion(brief.id);
+                            })}>Vorbereitung mit Textmodell prüfen</Button>
                             <Typography
                               component="h2"
                               variant="h5"
                               sx={{ mb: 2 }}
                             >
-                              {brief.question
+                              {preparingQuestion ? "Nächste Frage wird vorbereitet …" : brief.question
                                 ? brief.question.text
                                 : "Dein Anruf-Steckbrief"}
                             </Typography>
-                            {brief.question ? (
+                            {preparingQuestion ? (
+                              <Box role="status" aria-live="polite" aria-busy="true" sx={{ minHeight: 180, p: 2 }}>Deine Angaben werden geprüft. Bitte einen Moment …</Box>
+                            ) : brief.question ? (
                               <Stack spacing={1.5}>
                                 {brief.question.options.map((o: string) => (
                                   <Button
@@ -1066,6 +1078,8 @@ function App() {
                                         question,
                                         context,
                                         accepted_context,
+                                        ai_done,
+                                        ai_question,
                                         ...b
                                       } = brief;
                                       setBrief({
@@ -1102,20 +1116,7 @@ function App() {
                                     : "Steckbrief freigeben"}
                                 </Button>
                                 <Divider />
-                                <TextField
-                                  select
-                                  label="Gesprächsmodus"
-                                  value={mode}
-                                  onChange={(e) => setMode(e.target.value)}
-                                >
-                                  <MenuItem value="demo">
-                                    Demo – keine Telefonie, keine API-Kosten
-                                  </MenuItem>
-                                  <MenuItem value="live">
-                                    Live – SIP und ausgewähltes Modell
-                                  </MenuItem>
-                                </TextField>
-                                {!health.live_enabled && mode === "live" && (
+                                {!health.live_enabled && (
                                   <Alert severity="warning">
                                     Live-Telefonie ist bis zur gesonderten
                                     Abnahme gesperrt.
@@ -1127,7 +1128,7 @@ function App() {
                                   startIcon={<Icon name="phone" />}
                                   disabled={
                                     !brief.accepted ||
-                                    (mode === "live" && !health.live_enabled)
+                                    !health.live_enabled
                                   }
                                   onClick={() =>
                                     action(async () => {
@@ -1137,10 +1138,8 @@ function App() {
                                           "POST",
                                           {
                                             request_id: uuid(),
-                                            mode,
+                                            mode: "live",
                                             accepted_revision: brief.revision,
-                                            budget_eur:
-                                              settings.call_budget_eur,
                                           },
                                         ),
                                       );
@@ -1149,9 +1148,7 @@ function App() {
                                     })
                                   }
                                 >
-                                  {mode === "demo"
-                                    ? "Demo starten"
-                                    : "Jetzt anrufen"}
+                                  Jetzt anrufen
                                 </Button>
                               </Stack>
                             )}
@@ -1216,26 +1213,6 @@ function App() {
                                 <Typography variant="body2">Nur ausgewählte, bestätigte persönliche Angaben werden mitgegeben.</Typography>
                                 {memory.filter((m) => m.confirmed).map((m) => <FormControlLabel key={m.id} label={m.text} control={<Switch checked={selectedMemory.includes(m.id)} onChange={(_, checked) => setSelectedMemory((old) => checked ? [...old, m.id] : old.filter((id) => id !== m.id))} />} />)}
                                 <TextField
-                                  select
-                                  label="Gesprächsszenario"
-                                  value={scenario}
-                                  onChange={(e) => setScenario(e.target.value)}
-                                >
-                                  {[
-                                    ["restaurant", "Tisch reservieren"],
-                                    ["doctor", "Arzttermin vereinbaren"],
-                                    [
-                                      "airline",
-                                      "Rollstuhl für einen Flug anmelden",
-                                    ],
-                                    ["general", "Anderes Anliegen"],
-                                  ].map(([v, t]) => (
-                                    <MenuItem key={v} value={v}>
-                                      {t}
-                                    </MenuItem>
-                                  ))}
-                                </TextField>
-                                <TextField
                                   label="Telefonnummer"
                                   placeholder="+49 …"
                                   value={number}
@@ -1264,7 +1241,7 @@ function App() {
                                     }
                                   >
                                     <MenuItem value="">
-                                      Für Demo nicht erforderlich
+                                      Bitte auswählen
                                     </MenuItem>
                                     {profiles.sip.map((p: Row) => (
                                       <MenuItem key={p.id} value={p.id}>
@@ -1274,7 +1251,7 @@ function App() {
                                   </TextField>
                                   <TextField
                                     select
-                                    label="Sprachmodell"
+                                    label="Live-Audiomodell"
                                     value={settings.default_model || ""}
                                     onChange={(e) =>
                                       setSettings({
@@ -1284,15 +1261,19 @@ function App() {
                                     }
                                   >
                                     <MenuItem value="">
-                                      Für Demo nicht erforderlich
+                                      Bitte auswählen
                                     </MenuItem>
-                                    {profiles.models.map((p: Row) => (
+                                    {profiles.models.filter((p: Row) => p.purpose !== "text").map((p: Row) => (
                                       <MenuItem key={p.id} value={p.id}>
                                         {p.name}
                                       </MenuItem>
                                     ))}
                                   </TextField>
                                 </Stack>
+                                <TextField select label="Textmodell für die Vorabklärung" value={settings.default_text_model || ""} onChange={(e) => setSettings({...settings, default_text_model:e.target.value})}>
+                                  <MenuItem value="">Ohne KI-Vorabklärung</MenuItem>
+                                  {profiles.models.filter((p: Row) => p.purpose === "text").map((p: Row) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
+                                </TextField>
                                 <Button
                                   variant="contained"
                                   size="large"
@@ -1398,7 +1379,7 @@ function App() {
                                 </Typography>
                               </Box>
                               <Chip
-                                label={c.mode === "demo" ? "Demo" : c.status}
+                                label={c.status}
                               />
                             </Stack>
                             <Typography sx={{ mt: 2 }}>
@@ -1604,6 +1585,7 @@ function App() {
                                 <Typography sx={{ fontWeight: 700 }}>
                                   {p.name}
                                 </Typography>
+                                {p.phone_number && <Typography variant="body2">Zugeordnete Rufnummer: {p.phone_number}</Typography>}
                                 <Typography
                                   variant="body2"
                                   color="text.secondary"
@@ -1653,9 +1635,9 @@ function App() {
                                   variant="body2"
                                   color="text.secondary"
                                 >
-                                  {p.provider} · {p.model} · {p.voice}
+                                  {p.provider} · {p.model}{p.purpose !== "text" ? ` · ${p.voice}` : ""}
                                 </Typography>
-                                <Chip size="small" label="Live-Abnahme offen" />
+                                <Chip size="small" label={p.purpose === "text" ? "Text / Vorabklärung" : "Live-Audio"} />
                               </Box>
                               <Stack>
                                 <Button onClick={() => openProfile("model", p)}>
@@ -1731,17 +1713,10 @@ function App() {
                               <MenuItem value="de">Deutsch</MenuItem>
                               <MenuItem value="en">English</MenuItem>
                             </TextField>
-                            <TextField
-                              label="Budget pro Anruf (€)"
-                              type="number"
-                              value={settings.call_budget_eur}
-                              onChange={(e) =>
-                                setSettings({
-                                  ...settings,
-                                  call_budget_eur: Number(e.target.value),
-                                })
-                              }
-                            />
+                            <TextField select label="Textmodell für Vorabklärung und Memory" value={settings.default_text_model || ""} onChange={(e) => setSettings({...settings,default_text_model:e.target.value})}>
+                              <MenuItem value="">Ohne KI-Vorabklärung</MenuItem>
+                              {profiles.models.filter((p: Row) => p.purpose === "text").map((p: Row) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
+                            </TextField>
                             <FormControlLabel
                               control={
                                 <Switch
@@ -1866,11 +1841,9 @@ function App() {
                     </MenuItem>
                   )),
                 })}
-                {field("caller_id", "Absendernummer (optional)")}
+                {field("phone_number", "Zugeordnete Rufnummer (Anzeige)", {helperText: "Vom SIP-Provider zugeordnet. Ändert keine providerseitige Rufnummernzuweisung."})}
+                {field("caller_id", "SIP-Absenderidentität (optional)", {helperText: "Bei Fonial ist dies die technische Kontoidentität, nicht die öffentliche Rufnummer."})}
                 {field("stun", "STUN-Server (optional)")}
-                {field("phone_eur_per_minute", "Telefontarif €/Minute", {
-                  type: "number",
-                })}
               </>
             ) : (
               <>
@@ -1885,9 +1858,10 @@ function App() {
                     </MenuItem>,
                   ],
                 })}
-                {field("model", "Live-Modell-ID")}
-                {field("prep_model", "Vorbereitungsmodell (optional)")}
-                {field("voice", "Stimme")}
+                {field("purpose", "Verwendung", {select:true,children:[<MenuItem key="live" value="live">Live-Audio</MenuItem>,<MenuItem key="text" value="text">Text / Vorabklärung</MenuItem>]})}
+                {field("model", "Modell-ID")}
+                {profileForm.purpose !== "text" && field("voice", "Stimme")}
+                {profileForm.purpose !== "text" && profileForm.provider === "openai" && profileForm.model === "gpt-live-1" && field("backend_model", "Hintergrundmodell für Live-Aufgaben")}
                 {field("language", "Sprache", {
                   select: true,
                   children: [
@@ -1905,7 +1879,7 @@ function App() {
                   helperText:
                     "Gespeicherte Schlüssel werden nie zurück angezeigt.",
                 })}
-                {field("eagerness", "Turn-Erkennung", {
+                {profileForm.purpose !== "text" && profileForm.model !== "gpt-live-1" && field("eagerness", "Turn-Erkennung", {
                   select: true,
                   children: ["auto", "low", "medium", "high"].map((v) => (
                     <MenuItem key={v} value={v}>
@@ -1913,31 +1887,8 @@ function App() {
                     </MenuItem>
                   )),
                 })}
-                {field(
-                  "maximum_token_eur_per_million",
-                  "Konservative maximale €/Mio. Tokens",
-                  {
-                    type: "number",
-                    helperText:
-                      "Muss die teuerste verwendete Eingabe-/Ausgabekategorie abdecken.",
-                  },
-                )}
               </>
             )}
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={!!profileForm.pricing_confirmed}
-                  onChange={(e) =>
-                    setProfileForm({
-                      ...profileForm,
-                      pricing_confirmed: e.target.checked,
-                    })
-                  }
-                />
-              }
-              label="Tarif geprüft und bestätigt"
-            />
             <Alert severity="info">
               Speichern ist keine Live-Abnahme. Keine automatische Registrierung
               oder kostenpflichtige Audio-Probe.

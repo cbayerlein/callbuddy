@@ -1,0 +1,25 @@
+[Unit]
+Description=CallBuddy private LAN telephone assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/openclaw/workspace/projects/call-assistant
+Environment=HOST=127.0.0.1
+Environment=PORT=4177
+Environment=PUBLIC_URL=https://ubuntu-2404-openclaw.fritz.box/callbuddy/
+Environment=CALL_ASSISTANT_STATE=/var/lib/openclaw/state/projects/call-assistant
+Environment=CALL_ASSISTANT_LIVE=1
+Environment=HISTFILE=/dev/null
+Environment=PYTHONPATH=/var/lib/openclaw/workspace/projects/call-assistant/src
+ExecStart=/var/lib/openclaw/state/projects/call-assistant/work/venv/bin/python -m call_assistant
+Restart=on-failure
+RestartSec=3
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

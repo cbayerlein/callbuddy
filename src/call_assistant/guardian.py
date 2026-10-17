@@ -43,7 +43,9 @@ def main():
             time.sleep(.05)
         if native.poll() is not None:raise RuntimeError("Native endpoint stopped unexpectedly")
     except Exception as exc:
-        failure=type(exc).__name__;update(status="inconclusive",result="Technischer Fehler oder unklarer Effekt; keine Wiederholung.")
+        from .telemetry import record_failure
+        diagnostic=record_failure(store,id,exc,"guardian",config.get("model"))
+        failure=type(exc).__name__;update(status="inconclusive",result=diagnostic["message"],diagnostic=diagnostic)
     finally:
         if model and model.poll() is None:
             model.terminate()

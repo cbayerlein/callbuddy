@@ -1,5 +1,10 @@
 # CallBuddy — modular, self-hosted telephone assistant
 
+Configured LAN installation: **https://ubuntu-2404-openclaw.fritz.box/callbuddy/**.
+See `docs/lan-deployment.md` for the persistent service, HTTPS/CA, provisioned
+profiles, cost scope and verified versus still-open live acceptance.
+`docs/latency-research-20261015.md` records the new endpointing investigation.
+
 ## Architecture and implemented scope
 
 Each person runs their own installation. React/Material UI is presentation,
@@ -55,17 +60,21 @@ PUBLIC_URL=https://your-approved-host.example PORT=4177 python -m call_assistant
 
 Default bind is loopback. `HOST` controls an explicitly chosen LAN bind. Use
 HTTPS and a suitable reverse proxy for browser microphone support; HTTP LAN
-preview is suitable only for keyboard/demo UI, not entry of real credentials.
+preview is suitable only for UI inspection, not entry of real credentials.
 `PUBLIC_URL` must match the
 actual browser origin. The first visit sets this installation's own password.
 There is no preconfigured production password and no copied provider account.
 
-## Demo and live boundary
+## Telephone calls and diagnostics
 
-Demo executes real persistence, preparation, SSE, decisions, controls and
-exports, but its dialogue is scripted and has no provider effects. Demo audio
-is not a speech qualification. Live remains locked unless explicitly enabled
-with `CALL_ASSISTANT_LIVE=1`; do not enable before bounded provider acceptance.
+The app offers telephone calls only, enabled by `CALL_ASSISTANT_LIVE=1`.
+There is no product budget limit or tariff-based destination admission. Actual
+provider charges still apply. This does not remove separate research spending
+authorizations. Calls still require explicit acceptance and never redial automatically.
+Text preparation and live audio have independent profile selections. The
+operator text default is GPT-6 Luna, independent of the chosen audio provider.
+Provider failures, stages and redacted details are saved in the local database
+and exposed through authenticated `/api/calls/{id}/diagnostics`.
 
 Both adapters/native transports are implemented, not yet qualified end to
 end in this product. Remaining live acceptance covers provider billing/usage
@@ -73,7 +82,7 @@ semantics, first-audio latency, pronunciation, interruptions and final audio,
 TLS/registrar behaviour, browser monitor/mic and independent cleanup evidence.
 The registrar's unregister acknowledgement plus local closure is not proof
 of remote audio or an independent provider query. Estimated cost is not an
-invoice. Missing usage or uncertain effects stop the run without redial.
+invoice. Missing usage does not interrupt calls; uncertain effects never redial.
 
 The new implementation has no deterministic hearing/reference correctness
 guarantee. Prompt checks and future candidate imports cannot substitute for
@@ -89,10 +98,8 @@ node --check frontend/build.mjs
 node frontend/build.mjs
 ```
 
-`tests/browser_probe.cjs` uses only the already-open task tab at port 4178 in
-the shared Host Browser, with a separate synthetic UI fixture. It never
-creates/disposes a browser context or closes Chrome. It is a bounded local
-demo acceptance, not a general browser automation entrypoint.
+`tests/personal_setup_probe.cjs` checks the existing shared browser task tab.
+It never creates/disposes a browser context or calls a telephone number.
 
 See `NOTICE` for original AnrufBot attribution. No remote repository writes,
 commits, Gateway restarts or paid acceptance calls are part of this setup.
